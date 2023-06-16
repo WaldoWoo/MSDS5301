@@ -1,0 +1,536 @@
+---
+title: "New York City Shooting Incidents"
+author: "Taylor Edwards"
+date: "2023-06-15"
+output:
+  pdf_document:
+    extra_dependencies: ["float"]
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+The analysis presented in this document focuses on exploring and understanding a dataset provided by the NYPD. The dataset contains detailed information on shooting incidents in the city. This analysis assumes that the NYPD desires to reduce the total number of shooting incidents. This analysis uses data visualization and modelling to gain useful insights that may help the NYPD by:
+
+1.  Identifying any significant trends in shooting data
+2.  Informing resource allocation decisions
+3.  Understanding possible contributing factors to high-incident areas
+    -   Time
+    -   Location
+
+## Housekeeping
+
+To begin the analysis, it is necessary to install and load certain packages that will be used throughout the document. These packages provide various functionalities for data manipulation, visualization, mapping, and reporting. Please make sure to install the packages listed below.
+
+-   tidyverse
+-   tinytex
+-   shiny
+-   lubridate
+-   leaflet
+-   leaflet.extras
+-   ggmap
+-   RColorBrewer
+-   knitr
+-   kableExtra
+-   chron
+
+```{r library_packages, eval = TRUE , include = TRUE, echo = TRUE, message = FALSE}
+library(tidyverse)
+library(tinytex)
+library(dplyr)
+library(shiny)
+library(lubridate)
+library(leaflet)
+library(leaflet.extras)
+library(ggmap)
+library(RColorBrewer)
+library(knitr)
+library(kableExtra)
+library(chron)
+```
+
+## The Data
+
+```{r get_NYPD_data, include = TRUE, ECHO = TRUE}
+url_in<-"https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+NYPD_data <- read.csv(url_in, stringsAsFactors = FALSE)
+NYPD_data$OCCUR_DATE <- as.Date(NYPD_data$OCCUR_DATE, format = "%m/%d/%Y")
+NYPD_data$OCCUR_TIME <- strptime(NYPD_data$OCCUR_TIME, format = "%H:%M:%S")
+```
+
+The data set used in this document has been made available by the City of New York and can be downloaded at <https://catalog.data.gov/dataset>. The dataset provides information on every shooting in the city from `r min(format((NYPD_data$OCCUR_DATE),"%B %d, %Y"))` to `r max(format((NYPD_data$OCCUR_DATE),"%B %d, %Y"))`. The data is read in and stored in a dataframe called 'NYPD_data'.The dataframe contains `r format(nrow(NYPD_data), big.mark = ",")` observations of `r length(NYPD_data)` variables. Here is a look at the variables within the original dataset:
+
+```{r columns,eval=TRUE,include=TRUE,echo = TRUE}
+colnames(NYPD_data)
+```
+
+At first glance, data appears to be incomplete for several of variables including location description and perpetrator demographics. With a significant portion of the data missing for these variables, they are omitted from this analysis.
+
+```{r data_look, inlcude = TRUE, echo = TRUE, results = 'asis'}
+#Find amount of data missing from the data frame starting after the date column
+
+#select columns to look at
+NYPD_variables <- colnames(dplyr::select(NYPD_data, BORO:Lon_Lat)) 
+
+#Calculate total missing data points
+missing_counts <- sapply(dplyr::select(NYPD_data, BORO:Lon_Lat), function(column) {
+  sum(is.na(column) | column == "UNKNOWN" | column == "")
+})
+
+#calculate the percent of data missing for each variable
+missing_percent <- as.numeric(missing_counts/nrow(NYPD_data)) %>% 
+  round(2)
+
+#Put the vectors together
+data_look <- tibble(NYPD_variables,missing_counts,missing_percent)
+knitr::kable(data_look, align = c("l", "r", "r"), 
+             col.names = c("Variable", "Missing Counts", "Missing Percent"), digits = 2) %>% 
+kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) %>%
+  add_header_above(c("Completeness of Dataset Variables" = 3))
+```
+\
+\
+
+### Bias & Limitations
+
+It is important to acknowledge any biases or limitations in the data.  The source of the data, the City of New York, has stated that the data lists every shooting. Therefore, this analysis assumes that the dataset is complete and does not disproportionately represent certain demographics. However, we do not know the manner in which the data was collected and if this could introduce bias. 
+This analysis does not utilize the perpetrator-demographics data within the dataset for two reasons. First, the data is relatively incomplete for these variables. Second, race alone is not considered to have a causal relationship with shooting incidents. Perhaps with a more complete set of data, demographics could be used to accurately provide insights on perpetrators.  Without accompanying demographic data, the affects of age, race, and sex are not explored in this analysis.
+
+As mentioned in the previous section, there are variables for which a significant portion of data is missing. The data limits us from utilizing these variables which include location description, location classification, perpetrator age, perpetrator sex, and perpetrator race. These variables are omitted from this analysis because of their relative incompleteness to the other variables.
+
+## Data Analysis
+
+One important aspect of analyzing this dataset is to examine how the data changes over time. Any significant changes or patterns in the data may warrant further investigation. The objective is to iterate this process until an actionable insight is reached. First, we create a visualization that shows the total quantity of shootings each year. The allows us to identify relatively large changes in year-over-year (YoY) totals.\
+
+```{r YoY_trend, echo = TRUE, message=FALSE}
+#Find the annual totals of shooting incidents.
+year_tots <- NYPD_data %>% 
+  mutate(Year = lubridate::year(OCCUR_DATE)) %>% #Extract the year from the date data
+  dplyr::group_by(Year) %>% #Group the shootings by year
+  summarize(Shootings = n()) #Sum the quantity of shootings in each year
+
+#Create new dataframe that contains only annual total shootings for the entire city
+year_tots = mutate(year_tots, YoY_diff = (Shootings-lag(Shootings))/lag(Shootings))
+
+#Plot the data to see if there are any interesting trends/changes over time
+year_tots %>% 
+  ggplot(aes(x = Year, y = Shootings)) +
+  geom_line(aes(color = "Shootings")) +
+  geom_label(data = . %>% filter(abs(YoY_diff * 100) > 5),
+             aes(label = ifelse(YoY_diff * 100 > 0, sprintf("+%.1f%%", YoY_diff*100),
+                                sprintf("%.1f%%", YoY_diff*100))),
+             color = "black", vjust = -0.5) +
+  theme_minimal() +
+  theme(legend.position="none",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "YoY Shootings", x = "Year", y = "Quantity", caption = "Data Source: NYPD")
+```
+
+From the YoY data, we can see that significant progress was made from 2006 to 2017. Between 2006 and 2017 the total shooting incidents per year decreased from `r format(year_tots %>% filter(Year == 2006) %>% pull(Shootings), big.mark = ",")` to `r format(year_tots %>% filter(Year == 2017) %>% pull(Shootings), big.mark = ",")`. However, all of the progress appears to have been reversed in 2020 alone. Shooting incidents increased to `r format(year_tots %>% filter(Year == 2020) %>% pull(Shootings), big.mark = ",")` in 2020 resulting in an over 100% increase from the prior year. The dramatic increase in total shootings warrants asking a few more questions. We will now explore the shooting incidents by borough and examine how each contributes to YoY totals in shooting incidents.\
+
+
+```{r boro_totals, message=FALSE, warning=FALSE}
+#Group and summarize the original dataset around boros
+boro_by_year <- NYPD_data %>% 
+  mutate(Year = lubridate::year(OCCUR_DATE)) %>% #Extract the year from the date data
+  dplyr::group_by(BORO, Year) %>% #Group the shootings by year
+  summarize(Shootings = n()) #Sum the quantity of shootings in each year
+
+#Calculate the YoY change for each burrow
+boro_by_year = mutate(boro_by_year, boro_YoY_diff = 
+                        (Shootings-lag(Shootings))/lag(Shootings))
+
+#Create labels for the visualization, position them in an aesthetically pleasing way
+label_data_BORO <- data_frame(Year = c(2010,2010,2015,2022.5,2010),
+                              Shootings = c(130,600,700,400,375), 
+                              BORO = c("STATEN ISLAND",
+                                       "BRONX","BROOKLYN",
+                                       "MANHATTAN","QUEENS"))
+
+#Plot the data
+boro_by_year %>% 
+  ggplot(aes(x = Year, y = Shootings, color = BORO)) +
+  geom_line() +
+  geom_text(data = label_data_BORO, 
+            aes(x = Year, y = Shootings, label = BORO),
+            hjust = 1, vjust = 1, nudge_y = 10) +
+  theme_minimal() +
+  theme(legend.position="none",
+        axis.text.x = element_text(angle = 90)) +
+  labs(title = "Shootings by Borough", x = "Year", y = "Quantity", caption = "Data Source: NYPD")
+
+```
+
+By examining the total incidents by borough, we see that Brooklyn and the Bronx have contributed the most to the 2019-2020 increase in shootings. Allocating more police resources in Brooklyn and the Bronx may help reduce shooting incidents. To continue the data exploration, let's investigate the influence that the time of day may have on the quantity of incidents.\
+
+```{r TOD_boro}
+#yr_2020 <- filter(NYPD_data, lubridate::year(OCCUR_DATE) == 2020)
+
+#Extract the hour in which each incident occurred
+NYPD_data$hour <- hour(NYPD_data$OCCUR_TIME)
+
+#plot a histogram showing the density of shoots throughout the day, for each borough
+NYPD_data %>% 
+mutate(count = 1) %>% #add a counter so we sum qty of observations
+ggplot(aes(x = hour, y = count, fill = BORO)) + 
+  geom_col(position = "stack") +
+  labs(fill = "Borough", y = "Quantity", x = "Hour")
+
+```
+
+As one might expect, it appears that the frequency of shootings is highest at night. This phenomena also appears to be true for each borough. Allocating more police resources during nighttime hours may help reduce shooting incidents.
+
+
+
+```{r heat_map_brook, echo = FALSE, eval = FALSE, include = FALSE}
+NYPD_data %>% 
+  mutate(count = 1) %>% 
+  filter(year(OCCUR_DATE) == 2020) %>% 
+  leaflet() %>%
+  addTiles() %>%
+  addHeatmap(
+    lng = ~Longitude,
+    lat = ~Latitude, 
+    intensity=~count,
+    max=5,
+    radius=25,
+    blur=45) %>% 
+  labs(title = "Shootings in Brooklyn and The Bronx", caption = "Data Source: NYPD")
+
+
+
+```
+### Modeling
+This analysis includes some limited modeling of the data in an effort to provide another perspective. The NYPD may wish to know the estimated quantity of daily shootings. To produce this estimate, we amend the the data, counting the number of shootings on each day. A probability density function (PDF) is fit to this variable so that we can calculate the probability that a given quantity of shootings may happen in a day. This analysis assumes that no suitable PDF exists that fits the data well. Therefore, the analysis utilizes the concept of kernel density functions to approximate the PDF. We then plot the PDF and cumulative density function (CDF) to view its shape. These steps are shown in the code below:\
+
+```{r NYC_modeling, eval = TRUE}
+##Entire City
+#Make data for fitting a PDF, add a column with value of 1 so that every 
+#incident can be quantified
+for_mod <-NYPD_data %>% 
+  mutate(count = 1) %>%
+  group_by(OCCUR_DATE) %>% 
+  summarise(qty = sum(count))
+
+#Make sure zero-incident days are accounted for
+#Create a sequence of dates covering the entire range
+date_seq <- seq(min(for_mod$OCCUR_DATE), max(for_mod$OCCUR_DATE), by = "day")
+
+#Create a data frame with the date sequence
+all_dates <- data.frame(OCCUR_DATE = date_seq)
+
+#Merge the original data with the complete date sequence
+complete_data <- all_dates %>%
+  left_join(for_mod, by = "OCCUR_DATE") %>%
+  mutate(qty = replace_na(qty, 0))
+
+#Extract the quantity data only
+shootings <- na.omit(complete_data$qty)
+
+#Set bandwidth
+bw_shootings <- 1
+
+#Fit a kernel density function to the data
+kde <- density(shootings, bw = bw_shootings)
+
+#Create a function based on the kernel density estimate
+density_fun <- approxfun(kde$x, kde$y, rule = 2)
+
+#Define the range for integration
+range_min <- min(shootings)
+range_max <- max(shootings)
+
+#Re-scale density to obtain a probability density function
+kde_rescaled <- function(x) density_fun(x)/ +
+  integrate(density_fun, range_min, range_max)$value
+
+#Plot the re-scaled kernel density function
+x_vals <- seq(range_min, range_max, length.out = 1000)
+y_vals <- kde_rescaled(x_vals)
+
+ggplot() + 
+  geom_line(aes(x = x_vals, y = y_vals), alpha = 0.5) +
+    labs(title = "NYC Daily Shootings",
+       x = "Quantity",
+       y = "Density") +
+  annotate("text", x = max(x_vals) / 2, y = max(y_vals) * 0.95,
+           label = paste0("Kernel Bandwidth: ", round(bw_shootings, 2)))
+
+#Plot the CDF
+cdf_y <- c()
+cdf_x <- c()
+j = 1
+for (i in seq(0, range_max, by = 0.5)) {
+  cdf_y[j] = integrate(kde_rescaled, 0, i)$value
+  cdf_x[j] = i
+  j = j +1
+}
+
+ggplot() + 
+  geom_line(aes(x = cdf_x, y = cdf_y), alpha = 0.5) +
+    labs(title = "NYC Daily Shootings",
+       x = "Quantity",
+       y = "Cumulative Density")
+```
+
+To better understand the importance of the data's probability density, we proceed by calculating probabilities. Specifically, we examine the likelihood of different incident ranges, such as 0-10 shootings in a day, 10-20 shootings, and so on. This analysis allows us to gain valuable insights into the distribution and significance of the data.\
+
+```{r calc_probs_NYC}
+#Calculate a probability by integrating the re-scaled PDF over a range
+#Calculate probability of 0-5, 5-10, etc.
+j = 1
+prob_shootings <- c()
+step = 10
+for (i in seq(0, 40, by = step)){
+  lower_bound = i
+  upper_bound = i + step
+  prob_shootings[j] <- integrate(kde_rescaled, lower_bound, upper_bound)$value
+  j = j + 1
+}
+
+#Create labels for the data
+prob_labs <- c("0-10","10-20","20-30","30-40","40-50")
+  
+#Create the data frame for the table
+data_table <- data.frame(Qty = prob_labs, Probability = round(prob_shootings, digits = 4))
+
+#Print the table
+kable(data_table, col.names = c("Incident Quantity","Probability"), align = c("c", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F)
+
+```
+The analysis reveals that there is a `r round(prob_shootings[1], digits = 3)` probability of NYC having 0-10 shootings on any given day. The probability of 10-20 shootings occurring is `r round(prob_shootings[2], digits = 3)`, while the probability of more than 20 shootings is very low.
+
+Next, let's focus on Brooklyn, which that experienced a significant increase in shooting incidents in 2020. We will examine the probability of different incident quantities in Brooklyn, similar to how looked at the entire city.\
+
+
+```{r mod_BROOK, include = TRUE, eval = TRUE, echo = TRUE}
+
+data_BROOK <-NYPD_data %>%
+  mutate(count = 1) %>%
+  group_by(OCCUR_DATE, BORO) %>%
+  summarise(qty = sum(count)) %>% 
+  filter(BORO == "BROOKLYN") %>% 
+  dplyr::select(OCCUR_DATE, qty)
+
+
+#Create a sequence of dates covering the entire range
+date_seq <- seq(min(data_BROOK$OCCUR_DATE), max(data_BROOK$OCCUR_DATE), by = "day")
+
+#Create a data frame with the date sequence
+all_dates <- data.frame(OCCUR_DATE = date_seq)
+
+#Merge the original data with the complete date sequence
+data_BROOK <- all_dates %>%
+  left_join(data_BROOK, by = "OCCUR_DATE") %>%
+  mutate(qty = replace_na(qty, 0))
+
+
+#Extract the quantity data only
+shootings_BROOK <- na.omit(data_BROOK$qty)
+
+bw_BROOK <- 1
+
+#Fit a kernel density function to the data
+kde_BROOK <- density(shootings_BROOK, bw = bw_BROOK)
+
+#Create a function based on the kernel density estimate
+dens_fun_BROOK <- approxfun(kde_BROOK$x, kde_BROOK$y)
+
+#Define the range for integration
+range_min <- min(shootings_BROOK)
+range_max <- max(shootings_BROOK)
+
+#Re-scale density to obtain a probability density function
+kde_res_BROOK <- function(x) dens_fun_BROOK(x) / integrate(dens_fun_BROOK, range_min, range_max)$value
+
+#Plot the re-scaled kernel density function
+x_vals <- seq(range_min, range_max, length.out = 1000)
+y_vals <- kde_res_BROOK(x_vals)
+
+ggplot() + 
+  geom_line(aes(x = x_vals, y = y_vals), alpha = 0.5) +
+    labs(title = "Brooklyn Daily Shootings",
+       x = "Quantity",
+       y = "Density") +
+  annotate("text", x = max(x_vals)/2, y = max(y_vals)*0.95,
+           label = paste0("Kernel Bandwidth: ", round(bw_BROOK, 2)))
+
+#CDF
+cdf_y <- c()
+cdf_x <- c()
+j = 1
+for (i in seq(0, range_max, by = 0.5)) {
+  cdf_y[j] = integrate(kde_res_BROOK, 0, i)$value
+  cdf_x[j] = i
+  j = j +1
+}
+
+ggplot() + 
+  geom_line(aes(x = cdf_x, y = cdf_y), alpha = 0.5) +
+    labs(title = "Brooklyn Daily Shootings",
+       x = "Quantity",
+       y = "Cumulative Density")
+
+```
+Next, we'll take a look at some probabilities and see if there's any useful information. \
+
+```{r calc_probs_BROOK}
+#Calculate a probability by integrating the rescaled PDF over a range
+#Calculate probability of 0-5, 5-10, etc.
+j = 1
+prob_BROOK <- c()
+step = 2
+for (i in seq(0, range_max, by = step)){
+  lower_bound = i
+  upper_bound = i + step
+  prob_BROOK[j] <- integrate(kde_res_BROOK, lower_bound, upper_bound)$value
+  j = j + 1
+}
+
+#Create labels for the data
+prob_labs <- c("0-2", "2-4", "4-6", "6-8", "8-10", "10-12", "12-14", "14-16", "16-18", "18-20")
+  
+#Create the data frame for the table
+data_table <- data.frame(Qty = prob_labs, Probability = round(prob_BROOK, digits = 4))
+
+#Print the table
+kable(data_table, col.names = c("Incident Quantity","Probability"), 
+      align = c("c", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F)
+
+```
+This data may be somewhat helpful to the NYPD, but let's dig a little deeper. Let's find the probability that there are zero and eight or more shootings in Brooklyn.
+
+```{r more_BROOK}
+lower_bound = 0
+upper_bound = 1
+BROOK_0 <- integrate(kde_res_BROOK, lower_bound, upper_bound)$value
+
+lower_bound = 8
+upper_bound = range_max
+BROOK_over_8 <- integrate(kde_res_BROOK, lower_bound, upper_bound)$value
+
+lower_bound = 0
+upper_bound = 10
+BROOK_10 <- integrate(kde_res_BROOK, lower_bound, upper_bound)$value
+```
+
+We find that the probability of zero shootings on any given day is `r round(BROOK_0, digits = 3)`. This also gives us that the probability that at least one shooting occurs in Brooklyn is `r 1-round(BROOK_0, digits = 3)`. Furthermore, we see that the probability of 8 shooting incidents occurring, on any given day, is `r round(BROOK_over_8, digits = 3)`.
+
+#### Time-of-Day Probability
+
+The final portion of this analysis explores is the affect that time-of-day (TOD) has on probabilities. We will calculate the probability of that x-number of shootings will happen during any given hour of the day. For example, we may want to estimate the probability that between five and ten shootings will occur during the 20th hour of the day. This level of detailed analysis aims to provide the NYPD with actionable information. 
+
+The code below shows the steps to calculating these probabilities. The code serves as an example where only one probability is calculated. To establish a more complete picture of the situation, this code could be iterated over the time ranges of interest and between different boroughs. Note that the code includes a progress check of the data to ensure correctness. 
+
+```{r TOD, eval = TRUE, include = TRUE, echo = TRUE, message=FALSE}
+#Count the shootings by hour of the day, but first group the day by quantity
+#For example, this will count the number of times 1 shooting occurs during the
+#1st hour, 2 shootings occur in the 1st hour ... x-shootings occur during 
+#the  24th hour
+
+hour_tots <- NYPD_data %>%
+  mutate(count = 1) %>% #count each incident
+  mutate(hour = hour + 1) %>%
+  #add missing hours and dates where count of shootings = 0
+  complete(OCCUR_DATE, hour = 1:24, fill = list(count = 0)) %>% 
+  dplyr::group_by(OCCUR_DATE, hour) %>% 
+  #sum the qty of incidents within each hr of the day
+  summarize(qty = sum(count)) %>% 
+  #now give these a count for each unique hr-qty pairing
+  mutate(count = 1) %>% 
+  #Make an identifier for each hr-qty combo
+  mutate(TOD_ID = paste0(hour,"-",qty)) %>% 
+  dplyr::group_by(TOD_ID) %>% 
+  #sum the total hr-qty combos
+  summarize(TOD_qty = sum(count)) 
+
+
+#extract out the hour & qty of each row to check that total number
+#of shootings is the same as original data set
+hour_tots$hour <- str_extract(hour_tots$TOD_ID, "^[0-9]+")
+hour_tots$qty <- str_extract(hour_tots$TOD_ID, "(?<=-)[0-9]+")
+hour_tots$qty <- as.numeric(hour_tots$qty)
+test <- sum(hour_tots$qty*hour_tots$TOD_qty) == nrow(NYPD_data) #check
+
+#Make individual tables for each hour of the day. Here, we only make one
+hour_1 <- hour_tots %>% 
+  filter(hour == '1') %>% 
+  #Transform the table by replicating rows based on TOD_qty
+  uncount(TOD_qty)
+
+#Fit a kernel density function to the data
+bw_1 = 1
+kde_1 <- density(hour_1$qty, bw = bw_1)
+
+#Create a function based on the kernel density estimate
+density_fun <- approxfun(kde_1$x, kde_1$y, rule = 2)
+
+#Define the range for integration
+range_min <- min(hour_1$qty)
+range_max <- max(hour_1$qty)
+
+#Re-scale density to obtain a probability density function
+# X = P()
+kde_1 <- function(x) density_fun(x)/ +
+  integrate(density_fun, range_min, range_max)$value
+
+#Plot the re-scaled kernel density function
+x_vals <- seq(range_min, range_max, length.out = 1000)
+y_vals <- kde_1(x_vals)
+
+ggplot() + 
+  geom_line(aes(x = x_vals, y = y_vals), alpha = 0.5) +
+    labs(title = "Brooklyn Shootings: 12am-1am",
+       x = "Quantity",
+       y = "Density") +
+  annotate("text", x = max(x_vals) / 2, y = max(y_vals) * 0.95,
+           label = paste0("Kernel Bandwidth: ", round(bw_1, 2)))
+```
+
+The table below shows the individual probabilities that 0-10 shootings will occur in Brooklyn between 12am and 1am. These results are calculated for any given day.
+
+```{r BROOK_TOD_table, results = 'asis'}
+#Find probability of shootings by the hour
+TOD_qty_prob <- c()
+label <- c()
+for(i in 0:10){
+  lower_bound = i
+  upper_bound = i+1
+  TOD_qty_prob[i+1] <- integrate(kde_1, lower_bound, upper_bound)$value
+  label[i+1] <- i
+}
+
+#Put the data in a data frame
+TOD_df <- data.frame(Quantity = label, Probability = round(TOD_qty_prob, digits = 4))
+
+# Print the table
+kable(TOD_df, col.names = c("Quantity", "Probability"), align = c("c", "c")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = F) %>%
+  add_header_above(c("P(Brooklyn Shootings 12am-1am)" = 2))
+```
+
+\
+\
+\
+\
+\
+\
+\
+
+## Summary
+
+This analysis has examined shooting incident data provided by the NYPD. Shootings decreased significantly from 2006 to 2017, but rose drastically in 2020. To reduce the quantity of shooting incidents in the city, the police department may consider allocating more department resources in Brooklyn and the Bronx during nighttime hours. 
+
+In addition, the analysis included in this document modeled the probability of daily shooting event quantities. The was done for the entire city and Brooklyn alone. In general, that lower incident quantities are associated with higher probabilities of occurance. It may be trivial that the greater the number of incidents, the lower the probability. However, this data may better inform the NYPD on the resources it should allocate.
+
+Finally, the analysis investigated the effect that TOD has on the probability of shooting occurrences. A replicable method was provided for calculating the probability that X number of shootings will occur for a defined hour of the day. 
+
+#### Further Investigation
+
+This analysis considered limited examples of calculating probabilities to demonstrate the methods of doing so. The analysis could be expanded to include a comparison of boroughs and their respective probabilities of experiencing a certain number of incidents on any given day or by hour of the day. Investigating potential variations among boroughs and TOD probabilities could offer valuable insights. This analysis could provide the NYPD and the public with valuable information to enhance resource allocation and safety initiatives. 
+
